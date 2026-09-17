@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mstodo-to-ics"
+version = "0.1.0"
+description = "Export Microsoft To Do lists as RFC 5545 VTODO calendars"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "icalendar>=6.1,<8",
+    "tzdata>=2025.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.15",
+    "pytest>=8.3",
+    "ruff>=0.11",
+]
+
+[project.scripts]
+mstodo-to-ics = "mstodo_to_ics.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mstodo_to_ics"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]

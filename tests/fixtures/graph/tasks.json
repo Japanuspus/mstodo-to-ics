@@ -1,0 +1,46 @@
+{
+  "value": [
+    {
+      "id": "task/active?=1",
+      "title": "Køb æbler, mælk; og brød \\ ø",
+      "body": {
+        "content": "Første linje\nAnden linje med æ ø å Æ Ø Å, semikolon; og \\.",
+        "contentType": "text"
+      },
+      "status": "notStarted",
+      "importance": "high",
+      "createdDateTime": "2026-09-17T08:00:00.1234567Z",
+      "lastModifiedDateTime": "2026-09-17T09:30:00.7654321Z",
+      "startDateTime": {
+        "dateTime": "2026-10-24T09:15:00.0000000",
+        "timeZone": "Europe/Copenhagen"
+      },
+      "dueDateTime": {
+        "dateTime": "2026-10-25T02:30:00.0000000",
+        "timeZone": "Europe/Copenhagen"
+      },
+      "completedDateTime": null,
+      "categories": ["Hjem", "Haster, snart"]
+    },
+    {
+      "id": "task-completed-2",
+      "title": "Afsluttet opgave",
+      "body": {
+        "content": "Allerede færdig",
+        "contentType": "text"
+      },
+      "status": "completed",
+      "importance": "normal",
+      "createdDateTime": "2026-09-01T10:00:00Z",
+      "lastModifiedDateTime": "2026-09-16T18:45:00Z",
+      "completedDateTime": {
+        "dateTime": "2026-09-16T20:45:00.0000000",
+        "timeZone": "Europe/Copenhagen"
+      },
+      "dueDateTime": null,
+      "startDateTime": null,
+      "categories": []
+    }
+  ]
+}
+
