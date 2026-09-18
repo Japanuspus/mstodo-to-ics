@@ -8,13 +8,16 @@ The project currently supports personal-account Microsoft device-code
 authentication, read-only Microsoft Graph retrieval, offline export planning,
 and transactional bundle publication. It can retrieve every list/task page,
 normalize decoded Graph JSON, produce one validated calendar per list, preserve
-raw entities and page envelopes, and generate a migration manifest. CLI wiring
-for the online export flow is not implemented yet.
+raw entities and page envelopes, and generate a migration manifest through a
+Typer command line interface.
 
 ## Architecture
 
 ```text
-Microsoft Graph JSON
+Typer CLI → MSAL device-code authentication
+        |
+        v
+Microsoft Graph JSON (read-only)
         |
         v
 validated read-only pagination
@@ -55,6 +58,34 @@ uses an interprocess lock, rejects symlinks and overly broad existing file
 permissions, and publishes cache changes atomically with owner-only permissions.
 The cache, lock, and possible interrupted-write filenames are ignored by this
 repository.
+
+## Command line usage
+
+The export command requires the client ID of a Microsoft public application that
+supports personal accounts and device-code authentication. Supply it directly or
+through `MSTODO_TO_ICS_CLIENT_ID`:
+
+```bash
+mstodo-to-ics export ./todo-export --client-id YOUR_CLIENT_ID
+
+export MSTODO_TO_ICS_CLIENT_ID=YOUR_CLIENT_ID
+mstodo-to-ics export ./todo-export
+```
+
+The destination must not already exist. Authentication is memory-only unless
+plain-file persistence is explicitly enabled:
+
+```bash
+mstodo-to-ics export ./todo-export --persist-token-cache
+```
+
+Use `--dry-run` to retrieve, convert, and validate without creating the
+destination. A dry run still authenticates and sends read-only requests to
+Microsoft Graph.
+
+CLI exit codes are `0` for success, `1` for an expected authentication, Graph,
+conversion, or filesystem failure, `2` for invalid command usage, and `130` when
+an in-progress export is cancelled with `Ctrl+C`.
 
 ## Development
 

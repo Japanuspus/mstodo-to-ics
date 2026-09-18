@@ -13,6 +13,7 @@ dependencies = [
     "httpx>=0.28,<1",
     "icalendar>=6.1,<8",
     "msal>=1.34,<2",
+    "typer>=0.20,<1",
     "tzdata>=2025.2",
 ]
 
