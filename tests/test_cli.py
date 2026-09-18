@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from mstodo_to_ics import __version__, cli
+from mstodo_to_ics.config import DEFAULT_CONFIG_FILENAME
 from mstodo_to_ics.export import ExportInput, ExportPlan, RawListExport
 from mstodo_to_ics.graph import AccessTokenProvider, GraphError
 
@@ -156,6 +157,11 @@ def test_export_command_accepts_client_id_from_environment_and_reports_dry_run(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / DEFAULT_CONFIG_FILENAME).write_text(
+        '[auth]\nclient_id = "lower-precedence-client-id"\n',
+        encoding="utf-8",
+    )
     destination = tmp_path / "dry-run"
     calls: list[tuple[str, bool]] = []
 
@@ -185,6 +191,115 @@ def test_export_command_accepts_client_id_from_environment_and_reports_dry_run(
     assert "Dry run succeeded: 2 list(s), 3 task(s); no files were written." in result.stdout
     assert f"Proposed destination: {destination.absolute()}" in result.stdout
     assert "Token cache: memory only." in result.stdout
+
+
+def test_export_command_reads_default_config_from_working_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / DEFAULT_CONFIG_FILENAME).write_text(
+        '[auth]\nclient_id = "configured-client-id"\n',
+        encoding="utf-8",
+    )
+    received_client_ids: list[str] = []
+
+    def fake_execute_export(
+        destination: Path,
+        *,
+        client_id: str,
+        persist_token_cache: bool,
+        dry_run: bool,
+        device_code_callback: Callable[[str], None],
+    ) -> ExportPlan:
+        received_client_ids.append(client_id)
+        return _display_plan()
+
+    monkeypatch.setattr(cli, "execute_export", fake_execute_export)
+
+    result = runner.invoke(cli.app, ["export", "migration", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert received_client_ids == ["configured-client-id"]
+
+
+def test_export_command_reads_manually_selected_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_path = tmp_path / "custom.toml"
+    config_path.write_text('[auth]\nclient_id = "manual-client-id"\n', encoding="utf-8")
+    received_client_ids: list[str] = []
+
+    def fake_execute_export(
+        destination: Path,
+        *,
+        client_id: str,
+        persist_token_cache: bool,
+        dry_run: bool,
+        device_code_callback: Callable[[str], None],
+    ) -> ExportPlan:
+        received_client_ids.append(client_id)
+        return _display_plan()
+
+    monkeypatch.setattr(cli, "execute_export", fake_execute_export)
+
+    result = runner.invoke(
+        cli.app,
+        ["export", str(tmp_path / "migration"), "--config", str(config_path), "--dry-run"],
+    )
+
+    assert result.exit_code == 0
+    assert received_client_ids == ["manual-client-id"]
+
+
+def test_client_id_option_overrides_default_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / DEFAULT_CONFIG_FILENAME).write_text("invalid = [toml", encoding="utf-8")
+    received_client_ids: list[str] = []
+
+    def fake_execute_export(
+        destination: Path,
+        *,
+        client_id: str,
+        persist_token_cache: bool,
+        dry_run: bool,
+        device_code_callback: Callable[[str], None],
+    ) -> ExportPlan:
+        received_client_ids.append(client_id)
+        return _display_plan()
+
+    monkeypatch.setattr(cli, "execute_export", fake_execute_export)
+
+    result = runner.invoke(
+        cli.app,
+        ["export", "migration", "--client-id", "option-client-id", "--dry-run"],
+    )
+
+    assert result.exit_code == 0
+    assert received_client_ids == ["option-client-id"]
+
+
+def test_explicit_config_is_validated_even_when_client_id_option_is_present(
+    tmp_path: Path,
+) -> None:
+    result = runner.invoke(
+        cli.app,
+        [
+            "export",
+            str(tmp_path / "migration"),
+            "--client-id",
+            "option-client-id",
+            "--config",
+            str(tmp_path / "missing.toml"),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "configuration file does not exist" in result.stderr
 
 
 def test_expected_operational_error_is_concise(
@@ -229,7 +344,7 @@ def test_missing_client_id_is_a_usage_error(tmp_path: Path) -> None:
     result = runner.invoke(cli.app, ["export", str(tmp_path / "missing-client")])
 
     assert result.exit_code == 2
-    assert "Missing option '--client-id'" in result.stderr
+    assert "provide --client-id" in result.stderr
 
 
 def test_help_and_version() -> None:

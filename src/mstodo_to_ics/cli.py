@@ -10,6 +10,7 @@ import typer
 
 from . import __version__
 from .auth import AuthenticationError, MsalTokenProvider
+from .config import ConfigError, load_config
 from .export import ExportError, ExportInput, ExportPlan, export_bundle
 from .graph import AccessTokenProvider, GraphClient, GraphError
 from .normalize import NormalizationError
@@ -132,6 +133,26 @@ def _version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
+def _resolve_client_id(client_id: str | None, config_path: Path | None) -> str:
+    supplied_client_id = client_id.strip() if client_id is not None else ""
+    if supplied_client_id and config_path is None:
+        return supplied_client_id
+
+    try:
+        config = load_config(config_path)
+    except ConfigError as error:
+        raise typer.BadParameter(str(error), param_hint="--config") from error
+
+    if supplied_client_id:
+        return supplied_client_id
+    if config.client_id is not None:
+        return config.client_id
+    raise typer.BadParameter(
+        "provide --client-id, set MSTODO_TO_ICS_CLIENT_ID, or configure [auth].client_id",
+        param_hint="--client-id",
+    )
+
+
 app = typer.Typer(
     name="mstodo-to-ics",
     help="Export Microsoft To Do lists as validated RFC 5545 VTODO calendars.",
@@ -162,13 +183,20 @@ def export_command(
         typer.Argument(help="New directory in which to create the migration bundle."),
     ],
     client_id: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--client-id",
             envvar=CLIENT_ID_ENVIRONMENT_VARIABLE,
-            help="Microsoft public application client ID.",
+            help="Microsoft public application client ID; overrides the config file.",
         ),
-    ],
+    ] = None,
+    config_path: Annotated[
+        Path | None,
+        typer.Option(
+            "--config",
+            help="TOML config path; defaults to .mstodo-to-ics.toml in the working directory.",
+        ),
+    ] = None,
     persist_token_cache: Annotated[
         bool,
         typer.Option(
@@ -189,10 +217,12 @@ def export_command(
     def show_device_code(message: str) -> None:
         typer.echo(message, err=True)
 
+    resolved_client_id = _resolve_client_id(client_id, config_path)
+
     try:
         plan = execute_export(
             destination,
-            client_id=client_id,
+            client_id=resolved_client_id,
             persist_token_cache=persist_token_cache,
             dry_run=dry_run,
             device_code_callback=show_device_code,

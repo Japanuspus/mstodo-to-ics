@@ -62,8 +62,8 @@ repository.
 ## Command line usage
 
 The export command requires the client ID of a Microsoft public application that
-supports personal accounts and device-code authentication. Supply it directly or
-through `MSTODO_TO_ICS_CLIENT_ID`:
+supports personal accounts and device-code authentication. Supply it directly,
+through `MSTODO_TO_ICS_CLIENT_ID`, or in a TOML config file:
 
 ```bash
 mstodo-to-ics export ./todo-export --client-id YOUR_CLIENT_ID
@@ -71,6 +71,25 @@ mstodo-to-ics export ./todo-export --client-id YOUR_CLIENT_ID
 export MSTODO_TO_ICS_CLIENT_ID=YOUR_CLIENT_ID
 mstodo-to-ics export ./todo-export
 ```
+
+By default, the CLI discovers `.mstodo-to-ics.toml` in the current working
+directory:
+
+```toml
+[auth]
+client_id = "YOUR_CLIENT_ID"
+```
+
+Select a different file explicitly when needed:
+
+```bash
+mstodo-to-ics export ./todo-export --config /path/to/export-settings.toml
+```
+
+Client-ID precedence is `--client-id`, then `MSTODO_TO_ICS_CLIENT_ID`, then the
+selected or discovered config file. An explicitly selected config path must
+exist and be valid even when a higher-precedence client ID is also supplied. The
+default local config filename is ignored by this repository.
 
 The destination must not already exist. Authentication is memory-only unless
 plain-file persistence is explicitly enabled:

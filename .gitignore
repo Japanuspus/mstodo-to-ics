@@ -7,6 +7,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+.mstodo-to-ics.toml
 .mstodo-to-ics-private-token-cache.json
 .mstodo-to-ics-private-token-cache.json.tmp-*
 .mstodo-to-ics-private-token-cache.lock
