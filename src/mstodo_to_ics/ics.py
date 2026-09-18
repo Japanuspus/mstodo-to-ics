@@ -22,6 +22,10 @@ _STATUS_MAP = {
 _PRIORITY_MAP = {"high": 1, "normal": 5, "low": 9}
 
 
+def _normalize_newlines(value: str) -> str:
+    return value.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def task_uid(list_id: str, task_id: str) -> str:
     """Return a stable RFC-friendly UID for a source task."""
     identity = f"list:{list_id}\x1ftask:{task_id}"
@@ -41,7 +45,7 @@ def _add_graph_datetime(todo: Todo, name: str, value: GraphDateTime) -> None:
 
 def _checklist_line(item: ChecklistItem) -> str:
     marker = "x" if item.is_checked else " "
-    lines = item.display_name.splitlines() or [""]
+    lines = _normalize_newlines(item.display_name).split("\n")
     first, *continuation = lines
     rendered = [f"- [{marker}] {first}"]
     rendered.extend(f"  {line}" for line in continuation)
@@ -52,7 +56,7 @@ def task_description(task: TodoTask) -> str:
     """Return notes followed by the task's human-readable checklist block."""
     sections: list[str] = []
     if task.body.content:
-        sections.append(task.body.content)
+        sections.append(_normalize_newlines(task.body.content))
     if task.checklist_items:
         checklist = "Checklist:\n" + "\n".join(
             _checklist_line(item) for item in task.checklist_items

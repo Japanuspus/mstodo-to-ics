@@ -71,8 +71,16 @@ run `auth` if no usable cached login exists. It retrieves lists, tasks, complete
 task's checklist items with validated pagination. The new destination directory is published
 transactionally and is never overwritten.
 
+Task retrieval requests one item per page. A live personal-account migration showed that Graph can
+return truncated task JSON even for small multi-item pages. If a one-item response is truncated
+specifically inside Graph's implicit `linkedResources` expansion, the retriever accepts only the
+already complete core fields, retrieves linked resources from their dedicated endpoint, and records
+explicit recovery metadata in the raw page archive. Other malformed JSON remains a hard failure.
+
 The snapshot contains a schema-versioned `retrieval.json` plus raw entities and original Graph
-page envelopes under `raw/`. Unknown fields are retained.
+page envelopes under `raw/`. Unknown fields are retained. A snapshot contains private task data;
+do not publish or commit it. The documented `retrieve_*` and `todo-snapshot*` root-level naming
+patterns are ignored by this repository.
 
 ### 3. Export offline
 
@@ -98,6 +106,9 @@ requests but writes no snapshot. An export dry run is entirely offline and write
 
 Graph `dateTimeTimeZone` values retain their original local date-time string and timezone
 identifier rather than passing through the machine's local timezone.
+
+Text line endings are normalized to RFC 5545-compatible `LF` semantics when constructing
+descriptions. The raw snapshot retains Graph's original text and line endings unchanged.
 
 Checklist items remain on their parent task. They are preserved structurally in raw JSON and are
 rendered in the parent VTODO `DESCRIPTION` after the original notes:

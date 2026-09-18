@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import UTC, datetime
 from email.utils import format_datetime
@@ -10,6 +11,8 @@ import pytest
 
 from mstodo_to_ics.export import plan_export
 from mstodo_to_ics.graph import (
+    RECOVERY_METADATA_KEY,
+    TASK_PAGE_SIZE,
     GraphApiError,
     GraphClient,
     GraphPaginationError,
@@ -82,7 +85,7 @@ def test_fetches_all_pages_preserves_envelopes_and_plans_archive() -> None:
                 200,
                 json={"value": [{"id": "L2", "displayName": "Second"}]},
             )
-        if raw_path == f"/v1.0/me/todo/lists/{encoded_list_id}/tasks":
+        if raw_path == f"/v1.0/me/todo/lists/{encoded_list_id}/tasks?$top={TASK_PAGE_SIZE}":
             first_task = _task("T1")
             first_task["futureGraphField"] = {"preserve": True}
             return httpx.Response(
@@ -119,7 +122,7 @@ def test_fetches_all_pages_preserves_envelopes_and_plans_archive() -> None:
             )
         if raw_path == f"/v1.0/me/todo/lists/{encoded_list_id}/tasks/T2/checklistItems":
             return httpx.Response(200, json={"value": []})
-        if raw_path == "/v1.0/me/todo/lists/L2/tasks":
+        if raw_path == f"/v1.0/me/todo/lists/L2/tasks?$top={TASK_PAGE_SIZE}":
             return httpx.Response(200, json={"value": []})
         raise AssertionError(f"unexpected request: {request.url}")
 
@@ -282,6 +285,97 @@ def test_retries_transport_error() -> None:
     assert delays == [0.5]
 
 
+def test_retries_successful_response_with_invalid_json() -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(200, content=b'{"value":[')
+        return httpx.Response(200, json={"value": []})
+
+    client = GraphClient(
+        StubTokenProvider(),
+        http_client=_http_client(handler),
+        sleeper=delays.append,
+    )
+
+    assert client.fetch_export_data().sources == ()
+    assert attempts == 2
+    assert delays == [0.5]
+
+
+def test_invalid_json_error_reports_safe_response_metadata() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=b'{"private-task-data":',
+            headers={"content-type": "application/json", "request-id": "request-123"},
+        )
+
+    client = GraphClient(StubTokenProvider(), http_client=_http_client(handler), max_retries=0)
+
+    with pytest.raises(GraphProtocolError) as exc_info:
+        client.fetch_export_data()
+    message = str(exc_info.value)
+    assert "after 1 attempt(s)" in message
+    assert "bytes=21" in message
+    assert "request-id=request-123" in message
+    assert "private-task-data" not in message
+
+
+def test_recovers_task_when_graph_truncates_linked_resources_expansion() -> None:
+    task = {
+        "id": "task-1",
+        "title": "Recovered",
+        "body": {"content": "Complete notes", "contentType": "text"},
+    }
+    prefix = json.dumps({"value": [task]}, separators=(",", ":")).encode()
+    malformed = prefix[:-3] + (
+        b',"linkedResources@odata.context":"broken-context","linkedResources":[{"error":'
+    )
+    requested_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raw_path = request.url.raw_path.decode("ascii")
+        requested_paths.append(raw_path)
+        if raw_path == "/v1.0/me/todo/lists":
+            return httpx.Response(200, json={"value": [{"id": "L1", "displayName": "List"}]})
+        if raw_path == f"/v1.0/me/todo/lists/L1/tasks?$top={TASK_PAGE_SIZE}":
+            return httpx.Response(
+                200,
+                content=malformed,
+                headers={"content-type": "application/json", "request-id": "broken-page"},
+            )
+        if raw_path == "/v1.0/me/todo/lists/L1/tasks/task-1/linkedResources":
+            return httpx.Response(
+                200,
+                json={
+                    "@odata.context": "linked-context",
+                    "value": [{"id": "link-1", "webUrl": "https://example.test/item"}],
+                },
+            )
+        if raw_path == f"/v1.0/me/todo/lists/L1/tasks?$top={TASK_PAGE_SIZE}&$skip=1":
+            return httpx.Response(200, json={"value": []})
+        if raw_path == "/v1.0/me/todo/lists/L1/tasks/task-1/checklistItems":
+            return httpx.Response(200, json={"value": []})
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    client = GraphClient(StubTokenProvider(), http_client=_http_client(handler), max_retries=0)
+
+    result = client.fetch_export_data()
+
+    recovered = result.sources[0].raw_tasks[0]
+    assert recovered["body"] == {"content": "Complete notes", "contentType": "text"}
+    assert recovered["linkedResources"] == [{"id": "link-1", "webUrl": "https://example.test/item"}]
+    recovery = result.sources[0].raw_task_pages[0][RECOVERY_METADATA_KEY]
+    assert recovery["request_id"] == "broken-page"
+    assert recovery["source_task_id"] == "task-1"
+    assert "linkedResources" in requested_paths[2]
+
+
 def test_transport_error_after_retry_budget_is_structured() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("offline", request=request)
@@ -328,7 +422,7 @@ def test_graph_api_error_exposes_structured_details() -> None:
             },
         )
 
-    client = GraphClient(StubTokenProvider(), http_client=_http_client(handler))
+    client = GraphClient(StubTokenProvider(), http_client=_http_client(handler), max_retries=0)
 
     with pytest.raises(GraphApiError) as exc_info:
         client.fetch_export_data()
@@ -355,7 +449,7 @@ def test_rejects_malformed_page_envelopes(
     def handler(request: httpx.Request) -> httpx.Response:
         return response_factory()
 
-    client = GraphClient(StubTokenProvider(), http_client=_http_client(handler))
+    client = GraphClient(StubTokenProvider(), http_client=_http_client(handler), max_retries=0)
 
     with pytest.raises(GraphProtocolError):
         client.fetch_export_data()
@@ -381,7 +475,7 @@ def test_encodes_task_id_when_retrieving_checklists() -> None:
         requested_paths.append(raw_path)
         if raw_path == "/v1.0/me/todo/lists":
             return httpx.Response(200, json={"value": [{"id": "L1", "displayName": "List"}]})
-        if raw_path == "/v1.0/me/todo/lists/L1/tasks":
+        if raw_path == f"/v1.0/me/todo/lists/L1/tasks?$top={TASK_PAGE_SIZE}":
             return httpx.Response(200, json={"value": [_task(task_id)]})
         if raw_path == f"/v1.0/me/todo/lists/L1/tasks/{encoded_task_id}/checklistItems":
             return httpx.Response(200, json={"value": []})
@@ -398,7 +492,7 @@ def test_rejects_task_without_string_id_before_checklist_request() -> None:
         raw_path = request.url.raw_path.decode("ascii")
         if raw_path == "/v1.0/me/todo/lists":
             return httpx.Response(200, json={"value": [{"id": "L1", "displayName": "List"}]})
-        if raw_path == "/v1.0/me/todo/lists/L1/tasks":
+        if raw_path == f"/v1.0/me/todo/lists/L1/tasks?$top={TASK_PAGE_SIZE}":
             return httpx.Response(200, json={"value": [{"title": "No id"}]})
         raise AssertionError(f"unexpected request: {request.url}")
 

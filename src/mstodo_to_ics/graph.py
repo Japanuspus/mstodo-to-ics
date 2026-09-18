@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from typing import Any, Protocol, Self, cast
-from urllib.parse import quote, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import httpx
 
 from .export import RawChecklistExport, RawExportData, RawListExport
 
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
+TASK_PAGE_SIZE = 1
+RECOVERY_METADATA_KEY = "@mstodo-to-ics.recovery"
 
 Sleeper = Callable[[float], None]
 Clock = Callable[[], datetime]
@@ -41,6 +44,22 @@ class GraphProtocolError(GraphError):
 
 class GraphPaginationError(GraphProtocolError):
     """Raised when pagination cannot make safe forward progress."""
+
+
+class GraphInvalidJsonError(GraphProtocolError):
+    """A successful Graph response whose body is not valid JSON."""
+
+    def __init__(self, *, url: str, response: httpx.Response, attempts: int) -> None:
+        self.url = url
+        self.response_content = response.content
+        self.status_code = response.status_code
+        self.content_type = response.headers.get("content-type", "unknown")
+        self.request_id = response.headers.get("request-id", "unknown")
+        super().__init__(
+            f"Graph returned invalid JSON after {attempts} attempt(s) from {url} "
+            f"(status={self.status_code}, content-type={self.content_type!r}, "
+            f"bytes={len(self.response_content)}, request-id={self.request_id})"
+        )
 
 
 class GraphTransportError(GraphError):
@@ -118,7 +137,10 @@ class GraphClient:
             if not isinstance(list_id, str):
                 raise GraphProtocolError("a list entity is missing a string id")
             encoded_list_id = quote(list_id, safe="")
-            raw_tasks, task_pages = self._get_collection(f"/me/todo/lists/{encoded_list_id}/tasks")
+            raw_tasks, task_pages = self._get_task_collection(
+                list_id=list_id,
+                encoded_list_id=encoded_list_id,
+            )
             raw_checklists: list[RawChecklistExport] = []
             for raw_task in raw_tasks:
                 task_id = raw_task.get("id")
@@ -145,6 +167,131 @@ class GraphClient:
                 )
             )
         return RawExportData(sources=tuple(sources), raw_list_pages=list_pages)
+
+    def _get_task_collection(
+        self,
+        *,
+        list_id: str,
+        encoded_list_id: str,
+    ) -> tuple[tuple[Mapping[str, Any], ...], tuple[Mapping[str, Any], ...]]:
+        """Retrieve tasks, recovering a known malformed linkedResources response shape."""
+        initial_path = f"/me/todo/lists/{encoded_list_id}/tasks?$top={TASK_PAGE_SIZE}"
+        next_url: str | None = self._absolute_url(initial_path)
+        seen: set[str] = set()
+        items: list[Mapping[str, Any]] = []
+        pages: list[Mapping[str, Any]] = []
+
+        while next_url is not None:
+            if next_url in seen:
+                raise GraphPaginationError(f"Graph pagination loop detected at {next_url}")
+            seen.add(next_url)
+            try:
+                page = self._get_json(next_url)
+            except GraphInvalidJsonError as error:
+                recovered_task, recovery_page = self._recover_task_page(
+                    error,
+                    list_id=list_id,
+                    encoded_list_id=encoded_list_id,
+                )
+                items.append(recovered_task)
+                pages.append(recovery_page)
+                offset = self._task_page_offset(error.url)
+                next_url = self._absolute_url(
+                    f"/me/todo/lists/{encoded_list_id}/tasks?"
+                    f"$top={TASK_PAGE_SIZE}&$skip={offset + 1}"
+                )
+                continue
+
+            value = page.get("value")
+            if not isinstance(value, list):
+                raise GraphProtocolError(f"Graph collection at {next_url} has no array value")
+            for index, item in enumerate(value):
+                if not isinstance(item, Mapping):
+                    raise GraphProtocolError(
+                        f"Graph collection item {index} at {next_url} is not an object"
+                    )
+                items.append(cast(Mapping[str, Any], item))
+            pages.append(page)
+
+            continuation = page.get("@odata.nextLink")
+            if continuation is None:
+                next_url = None
+            elif isinstance(continuation, str) and continuation:
+                next_url = self._safe_graph_url(continuation)
+            else:
+                raise GraphProtocolError(
+                    f"Graph collection at {next_url} has an invalid @odata.nextLink"
+                )
+
+        return tuple(items), tuple(pages)
+
+    def _task_page_offset(self, url: str) -> int:
+        raw_values = parse_qs(urlsplit(url).query).get("$skip", ["0"])
+        if len(raw_values) != 1:
+            raise GraphProtocolError(f"cannot recover task page with ambiguous $skip: {url}")
+        try:
+            offset = int(raw_values[0])
+        except ValueError as error:
+            raise GraphProtocolError(
+                f"cannot recover task page with invalid $skip: {url}"
+            ) from error
+        if offset < 0:
+            raise GraphProtocolError(f"cannot recover task page with negative $skip: {url}")
+        return offset
+
+    def _recover_task_page(
+        self,
+        error: GraphInvalidJsonError,
+        *,
+        list_id: str,
+        encoded_list_id: str,
+    ) -> tuple[Mapping[str, Any], Mapping[str, Any]]:
+        marker = b'"linkedResources@odata.context"'
+        marker_index = error.response_content.find(marker)
+        if marker_index < 0:
+            raise error
+        core_prefix = error.response_content[:marker_index].rstrip()
+        if not core_prefix.endswith(b","):
+            raise error
+        repaired_page_bytes = core_prefix[:-1] + b"}]}"
+        try:
+            repaired_page = json.loads(repaired_page_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as recovery_error:
+            raise error from recovery_error
+        if not isinstance(repaired_page, Mapping):
+            raise error
+        value = repaired_page.get("value")
+        if not isinstance(value, list) or len(value) != 1 or not isinstance(value[0], Mapping):
+            raise error
+        recovered_task = dict(cast(Mapping[str, Any], value[0]))
+        task_id = recovered_task.get("id")
+        if not isinstance(task_id, str):
+            raise error
+
+        encoded_task_id = quote(task_id, safe="")
+        linked_items, linked_pages = self._get_collection(
+            f"/me/todo/lists/{encoded_list_id}/tasks/{encoded_task_id}/linkedResources"
+        )
+        recovered_task["linkedResources"] = list(linked_items)
+        first_context = linked_pages[0].get("@odata.context") if linked_pages else None
+        if isinstance(first_context, str):
+            recovered_task["linkedResources@odata.context"] = first_context
+
+        recovery_page: Mapping[str, Any] = {
+            "value": [recovered_task],
+            RECOVERY_METADATA_KEY: {
+                "reason": "invalid linkedResources expansion from Microsoft Graph",
+                "source_url": error.url,
+                "status": error.status_code,
+                "content_type": error.content_type,
+                "response_bytes": len(error.response_content),
+                "request_id": error.request_id,
+                "source_list_id": list_id,
+                "source_task_id": task_id,
+                "linked_resource_pages": list(linked_pages),
+            },
+        }
+        return recovered_task, recovery_page
 
     def _get_collection(
         self, initial_path: str
@@ -250,7 +397,15 @@ class GraphClient:
             try:
                 payload = response.json()
             except ValueError as error:
-                raise GraphProtocolError(f"Graph returned invalid JSON from {url}") from error
+                if retries < self._max_retries:
+                    self._sleep(0.5 * (2**retries))
+                    retries += 1
+                    continue
+                raise GraphInvalidJsonError(
+                    url=url,
+                    response=response,
+                    attempts=retries + 1,
+                ) from error
             if not isinstance(payload, Mapping):
                 raise GraphProtocolError(f"Graph returned a non-object JSON value from {url}")
             return cast(Mapping[str, Any], payload)

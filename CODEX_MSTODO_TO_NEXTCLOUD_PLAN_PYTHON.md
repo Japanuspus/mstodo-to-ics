@@ -267,6 +267,14 @@ Retrieve at least:
 
 Handle pagination correctly.
 
+Request task collections one item per page. A real migration test showed that Graph can return a
+truncated `200 application/json` response even for small multi-item pages. Retry malformed
+successful responses within the normal retry budget. A one-item response truncated specifically
+inside Graph's implicit `linkedResources` expansion may be recovered only when all core task fields
+parse completely; retrieve the relationship from its dedicated endpoint and record explicit
+recovery metadata in the raw page archive. Treat every other malformed response as a hard failure
+and report only safe response metadata, never response content.
+
 Preserve original API data in raw JSON.
 
 Do not silently drop fields simply because they are not mapped into VTODO yet.

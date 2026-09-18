@@ -11,3 +11,7 @@ dist/
 .mstodo-to-ics-private-token-cache.json
 .mstodo-to-ics-private-token-cache.json.tmp-*
 .mstodo-to-ics-private-token-cache.lock
+/retrieve_*/
+/export_*/
+/todo-snapshot*/
+/todo-export*/

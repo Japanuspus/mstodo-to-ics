@@ -81,3 +81,22 @@ def test_checklist_is_rendered_in_parent_description_without_child_vtodo(
         "Checklist:\n- [ ] Køb maling\n- [x] Mål væg\n  og loft"
     )
     assert todo.get("RELATED-TO") is None
+
+
+def test_description_normalizes_graph_line_endings_at_ics_boundary(
+    normalized_list: TodoList,
+) -> None:
+    parent = replace(
+        normalized_list.tasks[0],
+        body=replace(normalized_list.tasks[0].body, content="Line one\r\nLine two\rLine three"),
+        checklist_items=(ChecklistItem("check-1", "First\r\ncontinuation", False),),
+    )
+    task_list = replace(normalized_list, tasks=(parent,))
+
+    calendar = Calendar.from_ical(serialize_calendar(task_list))
+    todo = cast(Any, calendar.walk("VTODO")[0])
+
+    assert str(todo["DESCRIPTION"]) == (
+        "Line one\nLine two\nLine three\n\nChecklist:\n- [ ] First\n  continuation"
+    )
+    validate_calendar(serialize_calendar(task_list), task_list)
