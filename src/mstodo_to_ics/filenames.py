@@ -24,7 +24,12 @@ _MAX_STEM_LENGTH = 100
 
 
 def _id_suffix(source_id: str) -> str:
-    return hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:8]
+    return hashlib.sha256(source_id.encode("utf-8")).hexdigest()[:16]
+
+
+def stable_source_key(source_id: str) -> str:
+    """Return a portable, deterministic key for raw files containing a source ID."""
+    return hashlib.sha256(source_id.encode("utf-8")).hexdigest()
 
 
 def sanitize_filename_stem(display_name: str) -> str:
@@ -60,4 +65,8 @@ def allocate_list_filenames(lists: Iterable[TodoList]) -> dict[str, str]:
         if needs_suffix:
             stem = f"{stem}--{_id_suffix(item.source_id)}"
         result[item.source_id] = f"{stem}.ics"
+
+    allocated = tuple(name.casefold() for name in result.values())
+    if len(allocated) != len(set(allocated)):
+        raise ValueError("list IDs produced colliding output filenames")
     return result
