@@ -11,6 +11,7 @@ from icalendar import Calendar
 
 from mstodo_to_ics.export import (
     ExportError,
+    RawChecklistExport,
     RawListExport,
     export_bundle,
     plan_export,
@@ -86,14 +87,35 @@ def export_sources() -> tuple[RawListExport, ...]:
                 "unknownListField": "behold mig",
             },
             [active, completed],
+            raw_checklists=[
+                RawChecklistExport.from_raw(
+                    "active/1",
+                    [
+                        {
+                            "id": "check-1",
+                            "displayName": "Køb maling",
+                            "isChecked": False,
+                        },
+                        {
+                            "id": "check-2",
+                            "displayName": "Mål væg",
+                            "isChecked": True,
+                        },
+                    ],
+                ),
+                RawChecklistExport.from_raw("completed-2", []),
+            ],
+            checklists_collected=True,
         ),
         RawListExport.from_raw(
             {"id": "list-house-2", "displayName": "house", "isOwner": True},
             [],
+            checklists_collected=True,
         ),
         RawListExport.from_raw(
             {"id": "empty-list", "displayName": "Tom liste", "isOwner": True},
             [],
+            checklists_collected=True,
         ),
     )
 
@@ -127,12 +149,12 @@ def test_publishes_complete_bundle_with_raw_data_and_manifest(
         "tasks_with_reminders_detected": 1,
         "tasks_with_attachments_detected": 1,
         "unknown_statuses_detected": 0,
-        "checklist_items": None,
+        "checklist_items": 2,
         "linked_resources": None,
         "attachment_metadata": None,
     }
     assert manifest["collection_status"] == {
-        "checklist_items": "not_collected",
+        "checklist_items": "collected",
         "linked_resources": "not_collected",
         "attachment_metadata": "not_collected",
     }
@@ -157,6 +179,21 @@ def test_publishes_complete_bundle_with_raw_data_and_manifest(
         "kept": [1, True, None],
         "unicode": "æ ø å",
     }
+    first_raw_checklists_path = destination / list_entries[0]["raw_checklists_file"]
+    first_raw_checklists = json.loads(first_raw_checklists_path.read_text(encoding="utf-8"))
+    assert first_raw_checklists[0]["items"][1] == {
+        "displayName": "Mål væg",
+        "id": "check-2",
+        "isChecked": True,
+    }
+
+    first_calendar = Calendar.from_ical(
+        (destination / list_entries[0]["calendar_file"]).read_bytes()
+    )
+    active_todo = cast(Any, first_calendar.walk("VTODO")[0])
+    assert str(active_todo["DESCRIPTION"]) == (
+        "Første linje\nAnden linje\n\nChecklist:\n- [ ] Køb maling\n- [x] Mål væg"
+    )
 
 
 def test_plan_is_deterministic_with_injected_timestamp(

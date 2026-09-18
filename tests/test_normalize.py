@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from datetime import UTC
+from typing import Any
 
 import pytest
 
 from mstodo_to_ics.models import GraphDateTime, GraphInstant, TodoList
+from mstodo_to_ics.normalize import NormalizationError, normalize_list
 
 
 def test_normalization_preserves_graph_datetime_timezone(normalized_list: TodoList) -> None:
@@ -58,3 +60,61 @@ def test_unknown_timezone_fails_instead_of_using_machine_local_timezone() -> Non
 
     with pytest.raises(ValueError, match="unsupported Graph timezone"):
         value.as_aware()
+
+
+def test_normalizes_checklist_items_on_their_parent() -> None:
+    raw_list = {"id": "list-1", "displayName": "List"}
+    raw_task: dict[str, Any] = {
+        "id": "task-1",
+        "title": "Task",
+        "body": {"content": "", "contentType": "text"},
+        "status": "notStarted",
+        "importance": "normal",
+        "createdDateTime": "2026-09-17T08:00:00Z",
+        "lastModifiedDateTime": "2026-09-17T09:00:00Z",
+        "completedDateTime": None,
+        "dueDateTime": None,
+        "startDateTime": None,
+        "categories": [],
+    }
+    result = normalize_list(
+        raw_list,
+        [raw_task],
+        {
+            "task-1": [
+                {"id": "c1", "displayName": "Open", "isChecked": False},
+                {"id": "c2", "displayName": "Done", "isChecked": True},
+            ]
+        },
+    )
+
+    assert [
+        (item.source_id, item.display_name, item.is_checked)
+        for item in result.tasks[0].checklist_items
+    ] == [
+        ("c1", "Open", False),
+        ("c2", "Done", True),
+    ]
+
+
+def test_rejects_malformed_checklist_completion_state() -> None:
+    raw_list = {"id": "list-1", "displayName": "List"}
+    raw_task: dict[str, Any] = {
+        "id": "task-1",
+        "title": "Task",
+        "body": None,
+        "status": "notStarted",
+        "importance": "normal",
+        "createdDateTime": "2026-09-17T08:00:00Z",
+        "lastModifiedDateTime": "2026-09-17T09:00:00Z",
+        "completedDateTime": None,
+        "dueDateTime": None,
+        "startDateTime": None,
+        "categories": [],
+    }
+    with pytest.raises(NormalizationError, match="isChecked must be a boolean"):
+        normalize_list(
+            raw_list,
+            [raw_task],
+            {"task-1": [{"id": "c1", "displayName": "Bad", "isChecked": "yes"}]},
+        )

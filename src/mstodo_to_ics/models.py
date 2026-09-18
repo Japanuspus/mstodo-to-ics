@@ -88,6 +88,15 @@ class TaskBody:
 
 
 @dataclass(frozen=True, slots=True)
+class ChecklistItem:
+    """One Microsoft To Do checklist item retained on its parent task."""
+
+    source_id: str
+    display_name: str
+    is_checked: bool
+
+
+@dataclass(frozen=True, slots=True)
 class TodoTask:
     """Normalized fields currently mapped to a parent VTODO."""
 
@@ -103,6 +112,7 @@ class TodoTask:
     due_at: GraphDateTime | None
     start_at: GraphDateTime | None
     categories: tuple[str, ...]
+    checklist_items: tuple[ChecklistItem, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

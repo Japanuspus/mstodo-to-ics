@@ -7,7 +7,7 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 from icalendar import Calendar, Todo
 
-from .models import GraphDateTime, TodoList, TodoTask
+from .models import ChecklistItem, GraphDateTime, TodoList, TodoTask
 
 PRODUCT_ID = "-//mstodo-to-ics//EN"
 UID_NAMESPACE: UUID = uuid5(NAMESPACE_URL, "https://mstodo-to-ics.invalid/uid/v1")
@@ -39,6 +39,28 @@ def _add_graph_datetime(todo: Todo, name: str, value: GraphDateTime) -> None:
     todo.add(f"{source_prefix}-TIMEZONE", value.time_zone)
 
 
+def _checklist_line(item: ChecklistItem) -> str:
+    marker = "x" if item.is_checked else " "
+    lines = item.display_name.splitlines() or [""]
+    first, *continuation = lines
+    rendered = [f"- [{marker}] {first}"]
+    rendered.extend(f"  {line}" for line in continuation)
+    return "\n".join(rendered)
+
+
+def task_description(task: TodoTask) -> str:
+    """Return notes followed by the task's human-readable checklist block."""
+    sections: list[str] = []
+    if task.body.content:
+        sections.append(task.body.content)
+    if task.checklist_items:
+        checklist = "Checklist:\n" + "\n".join(
+            _checklist_line(item) for item in task.checklist_items
+        )
+        sections.append(checklist)
+    return "\n\n".join(sections)
+
+
 def task_to_vtodo(task: TodoTask) -> Todo:
     """Convert a normalized task into a parent VTODO component."""
     todo = Todo()
@@ -52,8 +74,10 @@ def task_to_vtodo(task: TodoTask) -> Todo:
     todo.add("X-MSTODO-LIST-ID", task.list_id)
     todo.add("X-MSTODO-TASK-ID", task.source_id)
 
+    description = task_description(task)
+    if description:
+        todo.add("description", description)
     if task.body.content:
-        todo.add("description", task.body.content)
         todo.add("X-MSTODO-BODY-CONTENT-TYPE", task.body.content_type)
     if task.start_at is not None:
         _add_graph_datetime(todo, "DTSTART", task.start_at)

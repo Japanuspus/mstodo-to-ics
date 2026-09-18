@@ -9,14 +9,19 @@ The implementation must be a new Python project. Existing repositories under `re
 Primary flow:
 
 ```text
-Microsoft To Do
-    │
+mstodo-to-ics auth
+    │ device-code login; private cache in the working directory
+    ▼
+mstodo-to-ics retrieve ./todo-snapshot
     │ Microsoft Graph, read-only
     ▼
-mstodo-to-ics (Python)
+durable raw source snapshot
     │
+    │ offline and repeatable
+    ▼
+mstodo-to-ics export ./todo-snapshot ./todo-export
     ├── one .ics file per list
-    ├── raw source JSON
+    ├── preserved raw source JSON
     └── manifest / validation report
     │
     ▼
@@ -71,6 +76,7 @@ mstodo-to-ics/
 │       ├── models.py
 │       ├── convert.py
 │       ├── ics.py
+│       ├── snapshot.py
 │       ├── export.py
 │       └── cli.py
 ├── tests/
@@ -106,8 +112,7 @@ Use it only as reference for:
 - Microsoft To Do Graph behavior
 - list/task/checklist retrieval
 - VTODO generation
-- recurrence → RRULE mapping
-- reminder → VALARM mapping
+- recurrence and reminder field handling
 - Microsoft-specific edge cases
 
 Do not:
@@ -134,7 +139,7 @@ Use it only as reference for:
 - completeness of Microsoft To Do extraction
 - completed-task handling
 - notes/body handling
-- checklist/subtask handling
+- checklist handling
 - attachments and attachment metadata
 - raw-export structure
 - Graph pagination / API edge cases
@@ -146,8 +151,12 @@ Do not modify it or depend on it at runtime.
 Build a new Python tool with a clean separation:
 
 ```text
-Microsoft Graph JSON
+device-code authentication
         ↓
+read-only Microsoft Graph retrieval
+        ↓
+durable raw JSON snapshot
+        ↓ offline boundary
 normalized Python domain model
         ↓
 RFC 5545 conversion
@@ -155,7 +164,8 @@ RFC 5545 conversion
 ICS serializer
 ```
 
-Keep Graph retrieval separate from conversion.
+Keep authentication, Graph retrieval, snapshot storage, and conversion separate. Export must be
+repeatable from a stored snapshot without Microsoft authentication or network access.
 
 The conversion layer must be testable entirely from fixture JSON without Microsoft authentication or network access.
 
@@ -171,21 +181,37 @@ Expected commands:
 
 ```bash
 mstodo-to-ics auth
-mstodo-to-ics lists
-mstodo-to-ics export ./todo-export
+mstodo-to-ics retrieve ./todo-snapshot
+mstodo-to-ics export ./todo-snapshot ./todo-export
 ```
 
-Useful optional commands/flags:
+Useful flags:
 
 ```bash
-mstodo-to-ics export ./todo-export --list "House"
-mstodo-to-ics export ./todo-export --list-id <id>
-mstodo-to-ics export ./todo-export --dry-run
+mstodo-to-ics auth --config /path/to/settings.toml
+mstodo-to-ics retrieve ./todo-snapshot --dry-run
+mstodo-to-ics export ./todo-snapshot ./todo-export --dry-run
 ```
+
+`auth` is the only command that may initiate device-code interaction. `retrieve` must use the
+persisted cache and fail with an instruction to run `auth` when no usable login exists. `export`
+must not authenticate or access the network.
 
 ## Output
 
-Example:
+Retrieval snapshot example:
+
+```text
+todo-snapshot/
+├── retrieval.json
+└── raw/
+    ├── lists.json
+    ├── tasks/
+    ├── checklists/
+    └── pages/
+```
+
+Export bundle example:
 
 ```text
 todo-export/
@@ -213,7 +239,10 @@ Requirements:
 - personal Microsoft accounts
 - device-code OAuth preferred
 - no manually pasted bearer tokens
-- local token cache where practical
+- `auth` always stores a private plaintext cache in the current working directory
+- invoking `auth` is the explicit opt-in to persistent token storage
+- `retrieve` uses that cache non-interactively from the same working directory
+- `export` has no authentication dependency
 - no write permissions
 
 Before implementing auth, inspect current official Microsoft Graph Python guidance and compare with the reference projects.
@@ -260,9 +289,12 @@ Minimum mapping:
 | completed datetime | `COMPLETED` |
 | importance | `PRIORITY` |
 | categories | `CATEGORIES` |
-| recurrence | `RRULE` |
-| reminder | `VALARM` |
+| recurrence | detect, count, preserve in raw JSON, and warn |
+| reminder | detect, count, preserve in raw JSON, and warn |
 | linked resources | preserve in `DESCRIPTION` initially |
+
+For recurrence and reminders, the warning is the complete v1 behavior, not a placeholder for
+an `RRULE` or `VALARM` implementation in a later v1 milestone.
 
 Also preserve source IDs:
 
@@ -275,27 +307,27 @@ UIDs must be stable between exports.
 
 Do not create random UIDs on each run.
 
-## Checklist items / subtasks
+## Checklist items
 
-Convert checklist items into child `VTODO` components when possible.
+Keep Microsoft checklist items as a checklist within the parent task. Do not convert them
+into child `VTODO` components or model them as Nextcloud subtasks.
 
-Use:
+Append a deterministic, human-readable checklist block to the parent VTODO's `DESCRIPTION`,
+after the original task notes. Represent completion without losing the original item text,
+for example:
 
-```ics
-RELATED-TO;RELTYPE=PARENT:<parent-uid>
+```text
+Checklist:
+- [ ] Buy paint
+- [x] Measure wall
 ```
 
-Each checklist item gets its own stable UID and:
+Preserve the structured checklist items, including their source IDs and completion state, in
+raw JSON. The text representation must have deterministic ordering and must not invent
+unavailable dates or metadata.
 
-```ics
-X-MSTODO-CHECKLIST-ID:<checklist-id>
-```
-
-Map checklist completion state to VTODO status.
-
-Do not invent unavailable dates/metadata.
-
-If Nextcloud requires an interoperability adjustment, document and test it explicitly.
+If Nextcloud requires an interoperability adjustment to display this checklist usefully,
+document and test it explicitly, while retaining the no-child-`VTODO` design.
 
 ## Calendar structure
 
@@ -320,22 +352,24 @@ Do not merge all lists into a single file by default.
 
 ## Raw backup
 
-Always preserve raw Microsoft data:
+The `retrieve` command always creates a durable, schema-versioned snapshot containing raw
+Microsoft data and original Graph page envelopes:
 
 ```text
+retrieval.json
 raw/lists.json
 raw/tasks/<list-id>.json
+raw/checklists/<list-id>.json
+raw/pages/...
 ```
 
-The raw export is part of the migration safety strategy.
-
-Design conversion so a future offline command such as:
+The `export` command consumes this snapshot offline and also includes the source raw JSON in its
+self-contained migration bundle. Re-running conversion after a code update requires only a new
+destination:
 
 ```bash
-mstodo-to-ics convert-raw ./todo-export/raw ./converted
+mstodo-to-ics export ./todo-snapshot ./todo-export-v2
 ```
-
-would be straightforward to add.
 
 ## Attachments
 
@@ -367,7 +401,10 @@ Example:
   "recurring_tasks": 11,
   "tasks_with_reminders": 34,
   "attachments_detected": 2,
-  "warnings": [],
+  "warnings": [
+    "11 recurring task(s) detected; recurrence is preserved in raw JSON but not mapped to RRULE",
+    "34 task(s) with reminders detected; reminders are preserved in raw JSON but not mapped to VALARM"
+  ],
   "errors": []
 }
 ```
@@ -379,13 +416,13 @@ Before reporting success:
 1. serialize each `.ics`
 2. parse it again with a standards-compliant Python iCalendar library
 3. verify:
-   - parent VTODO count
-   - child VTODO count
+   - VTODO count
    - required UIDs
    - no duplicate UIDs
-   - valid parent references
-   - parseable RRULEs
-   - parseable VALARMs
+   - expected checklist text is present in the parent description
+
+Recurrence and reminder warnings must also be validated against the source-data counts in the
+manifest. v1 does not emit `RRULE` or `VALARM`.
 
 Prefer mature iCalendar libraries rather than hand-writing the full format.
 
@@ -405,8 +442,8 @@ Test:
 - timed due dates
 - DST boundaries
 - completion timestamps
-- reminders
-- recurring tasks
+- recurrence detection and warning
+- reminder detection and warning
 
 ## Escaping
 
@@ -476,13 +513,17 @@ containing:
 - task with reminder
 - task with two checklist items
 
-Export only this list and manually import it into an empty Nextcloud list/calendar.
+Run the three commands, locate this list's generated `.ics` file, and manually import it into an
+empty Nextcloud list/calendar.
 
 Inspect in:
 
 1. Nextcloud Tasks
 2. Nextcloud Calendar
 3. relevant CalDAV client if useful
+
+Confirm that checklist text remains readable on the parent task and that recurring tasks and
+reminders are called out by the CLI and manifest rather than silently omitted.
 
 ## Tests
 
@@ -496,9 +537,9 @@ Add tests for at least:
 - start date
 - priority
 - multiple categories
-- recurrence
-- VALARM
-- checklist/subtask relation
+- recurrence detection, count, raw preservation, and warning
+- reminder detection, count, raw preservation, and warning
+- checklist collection and parent-description rendering
 - deterministic UID
 - filename sanitization
 - duplicate list names
@@ -521,6 +562,7 @@ src/mstodo_to_ics/
 ├── models.py
 ├── convert.py
 ├── ics.py
+├── snapshot.py
 ├── export.py
 └── cli.py
 ```
@@ -532,7 +574,8 @@ Suggested responsibilities:
 - `models.py`: normalized Python domain objects
 - `convert.py`: Graph/raw → domain model
 - `ics.py`: domain model → RFC 5545
-- `export.py`: files/raw JSON/manifest
+- `snapshot.py`: transactional raw snapshot storage and loading
+- `export.py`: ICS files, preserved raw JSON, and export manifest
 - `cli.py`: command line
 
 This layout is guidance, not a rigid requirement.
@@ -576,9 +619,9 @@ Do not let tooling complexity dominate the project.
 8. Add raw JSON and manifest output.
 9. Implement Graph retrieval.
 10. Implement device-code authentication.
-11. Add CLI.
-12. Add checklist → child VTODO conversion.
-13. Add recurrence/reminder/timezone/escaping tests.
+11. Add the staged `auth` → `retrieve` → offline `export` CLI and durable snapshot format.
+12. Add checklist retrieval, raw preservation, and parent-description rendering.
+13. Complete remaining timezone/escaping tests.
 14. Run tests/lint/typecheck.
 15. Perform small real `Migration test` export.
 16. Manually test import into Nextcloud.
@@ -590,6 +633,9 @@ v1 is complete when:
 
 - product is Python
 - personal Microsoft device-code login works
+- `auth` explicitly creates the private persistent cache
+- `retrieve` is non-interactive and creates a durable raw snapshot
+- `export` can be rerun offline from that snapshot after code changes
 - Graph access is read-only
 - all To Do lists can be enumerated
 - one `.ics` file is generated per list
@@ -598,9 +644,9 @@ v1 is complete when:
 - start/due dates migrate
 - importance migrates
 - categories migrate
-- recurrence migrates
-- reminders migrate
-- checklist items become usable subtasks, or incompatibility is documented with a deterministic fallback
+- recurrence is detected, counted, preserved in raw JSON, and reported with a warning
+- reminders are detected, counted, preserved in raw JSON, and reported with a warning
+- checklist items are preserved in raw JSON and rendered as a checklist in the parent task description
 - raw JSON is preserved
 - attachments are detected/reported
 - generated ICS self-validates
@@ -620,6 +666,9 @@ Do not build:
 - Microsoft cleanup
 - Nextcloud API integration
 - attachment upload into Nextcloud
+- recurrence-to-`RRULE` conversion
+- reminder-to-`VALARM` conversion
+- checklist-to-child-`VTODO` conversion
 - GUI
 - web app
 - daemon/service
@@ -672,8 +721,8 @@ Specifically:
    - completed-task handling
    - checklist retrieval
    - pagination
-   - recurrence mapping
-   - reminder mapping
+   - recurrence handling
+   - reminder handling
    - attachment handling
    - ICS/VTODO generation if present
 3. compare behavior and note important edge cases

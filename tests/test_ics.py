@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import cast
+from dataclasses import replace
+from typing import Any, cast
 
 from icalendar import Calendar
 
 from mstodo_to_ics.ics import serialize_calendar, task_uid
-from mstodo_to_ics.models import TodoList
+from mstodo_to_ics.models import ChecklistItem, TodoList
 from mstodo_to_ics.validate import validate_calendar
 
 
@@ -56,3 +57,27 @@ def test_uid_and_serialization_are_deterministic(normalized_list: TodoList) -> N
     assert first == second
     assert task_uid("list", "task") == task_uid("list", "task")
     assert task_uid("list-a", "task") != task_uid("list-b", "task")
+
+
+def test_checklist_is_rendered_in_parent_description_without_child_vtodo(
+    normalized_list: TodoList,
+) -> None:
+    parent = replace(
+        normalized_list.tasks[0],
+        checklist_items=(
+            ChecklistItem("check-1", "Køb maling", False),
+            ChecklistItem("check-2", "Mål væg\nog loft", True),
+        ),
+    )
+    task_list = replace(normalized_list, tasks=(parent,))
+
+    calendar = Calendar.from_ical(serialize_calendar(task_list))
+    todos = calendar.walk("VTODO")
+
+    assert len(todos) == 1
+    todo = cast(Any, todos[0])
+    assert str(todo["DESCRIPTION"]) == (
+        "Første linje\nAnden linje med æ ø å Æ Ø Å, semikolon; og \\.\n\n"
+        "Checklist:\n- [ ] Køb maling\n- [x] Mål væg\n  og loft"
+    )
+    assert todo.get("RELATED-TO") is None

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from icalendar import Calendar
 
-from .ics import task_uid
+from .ics import task_description, task_uid
 from .models import TodoList
 
 
@@ -62,6 +62,15 @@ def validate_calendar(data: bytes, expected: TodoList) -> ValidationReport:
             raise CalendarValidationError(f"VTODO {uid} has the wrong source list ID")
         if uid != task_uid(list_id, task_id):
             raise CalendarValidationError(f"VTODO {uid} does not match its source IDs")
+
+        source_task = next(task for task in expected.tasks if task.source_id == task_id)
+        expected_description = task_description(source_task)
+        actual_description_value = todo.get("DESCRIPTION")
+        actual_description = (
+            str(actual_description_value) if actual_description_value is not None else ""
+        )
+        if actual_description != expected_description:
+            raise CalendarValidationError(f"VTODO {uid} has the wrong description")
 
     return ValidationReport(
         parent_vtodo_count=len(todos),

@@ -107,6 +107,7 @@ class MsalTokenProvider:
         client_id: str,
         *,
         persist_cache: bool = False,
+        allow_device_code: bool = True,
         device_code_callback: DeviceCodeCallback = print,
         application_factory: ApplicationFactory = _new_application,
         cache_factory: CacheFactory = _new_cache,
@@ -114,6 +115,7 @@ class MsalTokenProvider:
         if not client_id.strip():
             raise ValueError("client_id cannot be empty")
         self._persist_cache = persist_cache
+        self._allow_device_code = allow_device_code
         self._device_code_callback = device_code_callback
         self._cache_path = Path.cwd() / PRIVATE_TOKEN_CACHE_FILENAME
         self._lock_path = Path.cwd() / PRIVATE_TOKEN_CACHE_LOCK_FILENAME
@@ -176,6 +178,10 @@ class MsalTokenProvider:
             if token is not None:
                 return token
 
+        if not self._allow_device_code:
+            raise AuthenticationError(
+                "no usable cached Microsoft login; run 'mstodo-to-ics auth' first"
+            )
         return self._acquire_by_device_code()
 
     def _acquire_by_device_code(self) -> str:

@@ -98,6 +98,27 @@ def test_fetches_all_pages_preserves_envelopes_and_plans_archive() -> None:
             )
         if raw_path == (f"/v1.0/me/todo/lists/{encoded_list_id}/tasks?$skiptoken=A%2FB%2B%3D"):
             return httpx.Response(200, json={"value": [_task("T2", status="completed")]})
+        if raw_path == f"/v1.0/me/todo/lists/{encoded_list_id}/tasks/T1/checklistItems":
+            return httpx.Response(
+                200,
+                json={
+                    "value": [{"id": "C1", "displayName": "Første punkt", "isChecked": False}],
+                    "@odata.nextLink": (
+                        "https://graph.microsoft.com/v1.0/me/todo/lists/"
+                        f"{encoded_list_id}/tasks/T1/checklistItems?$skiptoken=check%2F2"
+                    ),
+                    "futureChecklistPageField": "preserve checklist page",
+                },
+            )
+        if raw_path == (
+            f"/v1.0/me/todo/lists/{encoded_list_id}/tasks/T1/checklistItems?$skiptoken=check%2F2"
+        ):
+            return httpx.Response(
+                200,
+                json={"value": [{"id": "C2", "displayName": "Andet punkt", "isChecked": True}]},
+            )
+        if raw_path == f"/v1.0/me/todo/lists/{encoded_list_id}/tasks/T2/checklistItems":
+            return httpx.Response(200, json={"value": []})
         if raw_path == "/v1.0/me/todo/lists/L2/tasks":
             return httpx.Response(200, json={"value": []})
         raise AssertionError(f"unexpected request: {request.url}")
@@ -111,7 +132,16 @@ def test_fetches_all_pages_preserves_envelopes_and_plans_archive() -> None:
     assert len(export_data.raw_list_pages) == 2
     assert len(export_data.sources[0].raw_task_pages) == 2
     assert export_data.sources[0].raw_task_pages[0]["futurePageField"] == ("preserve this too")
-    assert provider.calls == [False, False, False, False, False]
+    assert export_data.sources[0].checklists_collected is True
+    assert [item["id"] for item in export_data.sources[0].raw_checklists[0].raw_items] == [
+        "C1",
+        "C2",
+    ]
+    assert (
+        export_data.sources[0].raw_checklists[0].raw_pages[0]["futureChecklistPageField"]
+        == "preserve checklist page"
+    )
+    assert provider.calls == [False] * 8
 
     plan = plan_export(export_data, exported_at=FIXED_NOW)
     planned_paths = {path.as_posix() for path in plan.relative_paths}
@@ -119,6 +149,10 @@ def test_fetches_all_pages_preserves_envelopes_and_plans_archive() -> None:
     assert "raw/pages/lists/0002.json" in planned_paths
     task_page_paths = [path for path in planned_paths if path.startswith("raw/pages/tasks/")]
     assert len(task_page_paths) == 3
+    checklist_page_paths = [
+        path for path in planned_paths if path.startswith("raw/pages/checklists/")
+    ]
+    assert len(checklist_page_paths) == 3
     manifest = plan.manifest
     assert manifest["raw_list_page_files"] == [
         "raw/pages/lists/0001.json",
@@ -334,4 +368,41 @@ def test_rejects_list_without_string_id() -> None:
     client = GraphClient(StubTokenProvider(), http_client=_http_client(handler))
 
     with pytest.raises(GraphProtocolError):
+        client.fetch_export_data()
+
+
+def test_encodes_task_id_when_retrieving_checklists() -> None:
+    requested_paths: list[str] = []
+    task_id = "task/a?=æ"
+    encoded_task_id = "task%2Fa%3F%3D%C3%A6"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raw_path = request.url.raw_path.decode("ascii")
+        requested_paths.append(raw_path)
+        if raw_path == "/v1.0/me/todo/lists":
+            return httpx.Response(200, json={"value": [{"id": "L1", "displayName": "List"}]})
+        if raw_path == "/v1.0/me/todo/lists/L1/tasks":
+            return httpx.Response(200, json={"value": [_task(task_id)]})
+        if raw_path == f"/v1.0/me/todo/lists/L1/tasks/{encoded_task_id}/checklistItems":
+            return httpx.Response(200, json={"value": []})
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    result = GraphClient(StubTokenProvider(), http_client=_http_client(handler)).fetch_export_data()
+
+    assert requested_paths[-1].endswith(f"/{encoded_task_id}/checklistItems")
+    assert result.sources[0].raw_checklists[0].task_id == task_id
+
+
+def test_rejects_task_without_string_id_before_checklist_request() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raw_path = request.url.raw_path.decode("ascii")
+        if raw_path == "/v1.0/me/todo/lists":
+            return httpx.Response(200, json={"value": [{"id": "L1", "displayName": "List"}]})
+        if raw_path == "/v1.0/me/todo/lists/L1/tasks":
+            return httpx.Response(200, json={"value": [{"title": "No id"}]})
+        raise AssertionError(f"unexpected request: {request.url}")
+
+    client = GraphClient(StubTokenProvider(), http_client=_http_client(handler))
+
+    with pytest.raises(GraphProtocolError, match="task entity is missing"):
         client.fetch_export_data()

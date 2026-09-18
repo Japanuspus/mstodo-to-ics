@@ -11,7 +11,7 @@ from urllib.parse import quote, urlsplit
 
 import httpx
 
-from .export import RawExportData, RawListExport
+from .export import RawChecklistExport, RawExportData, RawListExport
 
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 
@@ -110,7 +110,7 @@ class GraphClient:
         self.close()
 
     def fetch_export_data(self) -> RawExportData:
-        """Retrieve every list and every task, including completed tasks."""
+        """Retrieve every list, task, and task checklist, including completed tasks."""
         raw_lists, list_pages = self._get_collection("/me/todo/lists")
         sources: list[RawListExport] = []
         for raw_list in raw_lists:
@@ -119,11 +119,29 @@ class GraphClient:
                 raise GraphProtocolError("a list entity is missing a string id")
             encoded_list_id = quote(list_id, safe="")
             raw_tasks, task_pages = self._get_collection(f"/me/todo/lists/{encoded_list_id}/tasks")
+            raw_checklists: list[RawChecklistExport] = []
+            for raw_task in raw_tasks:
+                task_id = raw_task.get("id")
+                if not isinstance(task_id, str):
+                    raise GraphProtocolError("a task entity is missing a string id")
+                encoded_task_id = quote(task_id, safe="")
+                checklist_items, checklist_pages = self._get_collection(
+                    f"/me/todo/lists/{encoded_list_id}/tasks/{encoded_task_id}/checklistItems"
+                )
+                raw_checklists.append(
+                    RawChecklistExport.from_raw(
+                        task_id,
+                        checklist_items,
+                        raw_pages=checklist_pages,
+                    )
+                )
             sources.append(
                 RawListExport.from_raw(
                     raw_list,
                     raw_tasks,
                     raw_task_pages=task_pages,
+                    raw_checklists=raw_checklists,
+                    checklists_collected=True,
                 )
             )
         return RawExportData(sources=tuple(sources), raw_list_pages=list_pages)

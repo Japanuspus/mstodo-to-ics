@@ -29,12 +29,33 @@ class ExportError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class RawChecklistExport:
+    """Decoded checklist entities and page envelopes for one parent task."""
+
+    task_id: str
+    raw_items: tuple[Mapping[str, Any], ...]
+    raw_pages: tuple[Mapping[str, Any], ...] = ()
+
+    @classmethod
+    def from_raw(
+        cls,
+        task_id: str,
+        raw_items: Sequence[Mapping[str, Any]],
+        *,
+        raw_pages: Sequence[Mapping[str, Any]] = (),
+    ) -> RawChecklistExport:
+        return cls(task_id=task_id, raw_items=tuple(raw_items), raw_pages=tuple(raw_pages))
+
+
+@dataclass(frozen=True, slots=True)
 class RawListExport:
     """Decoded Graph entities for one list, retaining every JSON field."""
 
     raw_list: Mapping[str, Any]
     raw_tasks: tuple[Mapping[str, Any], ...]
     raw_task_pages: tuple[Mapping[str, Any], ...] = ()
+    raw_checklists: tuple[RawChecklistExport, ...] = ()
+    checklists_collected: bool = False
 
     @classmethod
     def from_raw(
@@ -43,12 +64,16 @@ class RawListExport:
         raw_tasks: Sequence[Mapping[str, Any]],
         *,
         raw_task_pages: Sequence[Mapping[str, Any]] = (),
+        raw_checklists: Sequence[RawChecklistExport] = (),
+        checklists_collected: bool = False,
     ) -> RawListExport:
         """Create a source while preserving entity dictionaries unchanged."""
         return cls(
             raw_list=raw_list,
             raw_tasks=tuple(raw_tasks),
             raw_task_pages=tuple(raw_task_pages),
+            raw_checklists=tuple(raw_checklists),
+            checklists_collected=checklists_collected,
         )
 
 
@@ -121,6 +146,22 @@ def _source_id(source: RawListExport) -> str:
     return source_id
 
 
+def _checklist_mapping(source: RawListExport) -> dict[str, tuple[Mapping[str, Any], ...]]:
+    task_ids = {task.get("id") for task in source.raw_tasks if isinstance(task.get("id"), str)}
+    result: dict[str, tuple[Mapping[str, Any], ...]] = {}
+    for checklist in source.raw_checklists:
+        if checklist.task_id not in task_ids:
+            raise ExportError(f"checklist data references unknown task ID: {checklist.task_id}")
+        if checklist.task_id in result:
+            raise ExportError(f"duplicate checklist data for task ID: {checklist.task_id}")
+        result[checklist.task_id] = checklist.raw_items
+    if source.checklists_collected and set(result) != task_ids:
+        raise ExportError("collected checklist data must contain one entry for every task")
+    if not source.checklists_collected and result:
+        raise ExportError("checklist data cannot be present when collection is marked incomplete")
+    return result
+
+
 def _feature_counts(raw_tasks: Sequence[Mapping[str, Any]]) -> dict[str, int]:
     return {
         "completed_tasks": sum(task.get("status") == "completed" for task in raw_tasks),
@@ -143,11 +184,13 @@ def _warning_messages(summary: Mapping[str, int]) -> list[str]:
     warning_specs = (
         (
             "recurring_tasks_detected",
-            "recurring task(s) detected, but recurrence is not mapped in this milestone",
+            "recurring task(s) detected; recurrence is preserved in raw JSON but v1 does not "
+            "map it to RRULE",
         ),
         (
             "tasks_with_reminders_detected",
-            "task(s) with reminders detected, but VALARM is not mapped in this milestone",
+            "task(s) with reminders detected; reminders are preserved in raw JSON but v1 does "
+            "not map them to VALARM",
         ),
         (
             "tasks_with_attachments_detected",
@@ -188,8 +231,10 @@ def plan_export(sources: ExportInput, *, exported_at: datetime) -> ExportPlan:
     if len(source_ids) != len(set(source_ids)):
         raise ExportError("raw export contains duplicate list IDs")
 
+    checklist_mappings = tuple(_checklist_mapping(source) for source in source_items)
     normalized: tuple[TodoList, ...] = tuple(
-        normalize_list(source.raw_list, source.raw_tasks) for source in source_items
+        normalize_list(source.raw_list, source.raw_tasks, checklists)
+        for source, checklists in zip(source_items, checklist_mappings, strict=True)
     )
     calendar_names = allocate_list_filenames(normalized)
 
@@ -203,6 +248,7 @@ def plan_export(sources: ExportInput, *, exported_at: datetime) -> ExportPlan:
         "unknown_statuses_detected": 0,
     }
 
+    total_checklist_items = 0
     for source, task_list in zip(source_items, normalized, strict=True):
         calendar_data = serialize_calendar(task_list)
         validation = validate_calendar(calendar_data, task_list)
@@ -218,6 +264,12 @@ def plan_export(sources: ExportInput, *, exported_at: datetime) -> ExportPlan:
             )
             for page_number in range(1, len(source.raw_task_pages) + 1)
         )
+        raw_checklists_path = Path(
+            "raw", "checklists", f"{stable_source_key(task_list.source_id)}.json"
+        )
+        raw_checklist_page_entries: list[dict[str, Any]] = []
+        checklist_count = sum(len(checklist.raw_items) for checklist in source.raw_checklists)
+        total_checklist_items += checklist_count
         counts = _feature_counts(source.raw_tasks)
         for key in aggregate:
             aggregate[key] += counts[key]
@@ -232,6 +284,40 @@ def plan_export(sources: ExportInput, *, exported_at: datetime) -> ExportPlan:
             PlannedFile(path, _json_bytes(page))
             for path, page in zip(raw_task_page_paths, source.raw_task_pages, strict=True)
         )
+        if source.checklists_collected:
+            planned_files.append(
+                PlannedFile(
+                    raw_checklists_path,
+                    _json_bytes(
+                        [
+                            {"task_id": checklist.task_id, "items": list(checklist.raw_items)}
+                            for checklist in source.raw_checklists
+                        ]
+                    ),
+                )
+            )
+            for checklist in source.raw_checklists:
+                page_paths = tuple(
+                    Path(
+                        "raw",
+                        "pages",
+                        "checklists",
+                        stable_source_key(task_list.source_id),
+                        stable_source_key(checklist.task_id),
+                        f"{page_number:04d}.json",
+                    )
+                    for page_number in range(1, len(checklist.raw_pages) + 1)
+                )
+                planned_files.extend(
+                    PlannedFile(path, _json_bytes(page))
+                    for path, page in zip(page_paths, checklist.raw_pages, strict=True)
+                )
+                raw_checklist_page_entries.append(
+                    {
+                        "task_id": checklist.task_id,
+                        "files": [path.as_posix() for path in page_paths],
+                    }
+                )
         manifest_lists.append(
             {
                 "source_id": task_list.source_id,
@@ -239,7 +325,12 @@ def plan_export(sources: ExportInput, *, exported_at: datetime) -> ExportPlan:
                 "calendar_file": calendar_path.as_posix(),
                 "raw_tasks_file": raw_tasks_path.as_posix(),
                 "raw_task_page_files": [path.as_posix() for path in raw_task_page_paths],
+                "raw_checklists_file": (
+                    raw_checklists_path.as_posix() if source.checklists_collected else None
+                ),
+                "raw_checklist_page_files": raw_checklist_page_entries,
                 "tasks": len(task_list.tasks),
+                "checklist_items": checklist_count if source.checklists_collected else None,
                 **counts,
                 "validation": _validation_manifest(validation),
             }
@@ -262,7 +353,11 @@ def plan_export(sources: ExportInput, *, exported_at: datetime) -> ExportPlan:
         "lists": len(source_items),
         "tasks": sum(len(source.raw_tasks) for source in source_items),
         **aggregate,
-        "checklist_items": None,
+        "checklist_items": (
+            total_checklist_items
+            if all(source.checklists_collected for source in source_items)
+            else None
+        ),
         "linked_resources": None,
         "attachment_metadata": None,
     }
@@ -272,7 +367,11 @@ def plan_export(sources: ExportInput, *, exported_at: datetime) -> ExportPlan:
         "exported_at": exported_at_text,
         "summary": summary,
         "collection_status": {
-            "checklist_items": "not_collected",
+            "checklist_items": (
+                "collected"
+                if all(source.checklists_collected for source in source_items)
+                else "not_collected"
+            ),
             "linked_resources": "not_collected",
             "attachment_metadata": "not_collected",
         },

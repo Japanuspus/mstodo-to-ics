@@ -85,6 +85,7 @@ def _provider(
     application: FakeApplication,
     *,
     persist_cache: bool = False,
+    allow_device_code: bool = True,
     messages: list[str] | None = None,
     construction: list[tuple[str, str]] | None = None,
 ) -> MsalTokenProvider:
@@ -101,6 +102,7 @@ def _provider(
     return MsalTokenProvider(
         "public-client-id",
         persist_cache=persist_cache,
+        allow_device_code=allow_device_code,
         device_code_callback=(messages.append if messages is not None else lambda _: None),
         application_factory=application_factory,
         cache_factory=lambda: cache,
@@ -198,6 +200,19 @@ def test_silent_cache_miss_falls_back_to_device_flow() -> None:
 
     assert provider.get_token() == "device-token"
     assert application.device_acquisition_count == 1
+
+
+def test_noninteractive_cache_miss_requires_auth_command(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cache = FakeCache()
+    application = FakeApplication(cache)
+    provider = _provider(cache, application, persist_cache=True, allow_device_code=False)
+
+    with pytest.raises(AuthenticationError, match="run 'mstodo-to-ics auth' first"):
+        provider.get_token()
+    assert application.device_acquisition_count == 0
 
 
 def test_multiple_cached_accounts_are_not_selected_implicitly() -> None:
