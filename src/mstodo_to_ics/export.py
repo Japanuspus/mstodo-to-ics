@@ -34,13 +34,38 @@ class RawListExport:
 
     raw_list: Mapping[str, Any]
     raw_tasks: tuple[Mapping[str, Any], ...]
+    raw_task_pages: tuple[Mapping[str, Any], ...] = ()
 
     @classmethod
     def from_raw(
-        cls, raw_list: Mapping[str, Any], raw_tasks: Sequence[Mapping[str, Any]]
+        cls,
+        raw_list: Mapping[str, Any],
+        raw_tasks: Sequence[Mapping[str, Any]],
+        *,
+        raw_task_pages: Sequence[Mapping[str, Any]] = (),
     ) -> RawListExport:
         """Create a source while preserving entity dictionaries unchanged."""
-        return cls(raw_list=raw_list, raw_tasks=tuple(raw_tasks))
+        return cls(
+            raw_list=raw_list,
+            raw_tasks=tuple(raw_tasks),
+            raw_task_pages=tuple(raw_task_pages),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class RawExportData:
+    """All decoded entities plus original list collection page envelopes."""
+
+    sources: tuple[RawListExport, ...]
+    raw_list_pages: tuple[Mapping[str, Any], ...] = ()
+
+    @classmethod
+    def from_sources(cls, sources: Sequence[RawListExport]) -> RawExportData:
+        """Wrap manually supplied sources that have no Graph page envelopes."""
+        return cls(sources=tuple(sources))
+
+
+type ExportInput = Sequence[RawListExport] | RawExportData
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,15 +173,23 @@ def _validation_manifest(report: ValidationReport) -> dict[str, int | str]:
     }
 
 
-def plan_export(sources: Sequence[RawListExport], *, exported_at: datetime) -> ExportPlan:
+def _export_data(value: ExportInput) -> RawExportData:
+    if isinstance(value, RawExportData):
+        return value
+    return RawExportData.from_sources(value)
+
+
+def plan_export(sources: ExportInput, *, exported_at: datetime) -> ExportPlan:
     """Build and validate every output file without touching the filesystem."""
+    export_data = _export_data(sources)
+    source_items = export_data.sources
     exported_at_text = _format_timestamp(exported_at)
-    source_ids = tuple(_source_id(source) for source in sources)
+    source_ids = tuple(_source_id(source) for source in source_items)
     if len(source_ids) != len(set(source_ids)):
         raise ExportError("raw export contains duplicate list IDs")
 
     normalized: tuple[TodoList, ...] = tuple(
-        normalize_list(source.raw_list, source.raw_tasks) for source in sources
+        normalize_list(source.raw_list, source.raw_tasks) for source in source_items
     )
     calendar_names = allocate_list_filenames(normalized)
 
@@ -170,11 +203,21 @@ def plan_export(sources: Sequence[RawListExport], *, exported_at: datetime) -> E
         "unknown_statuses_detected": 0,
     }
 
-    for source, task_list in zip(sources, normalized, strict=True):
+    for source, task_list in zip(source_items, normalized, strict=True):
         calendar_data = serialize_calendar(task_list)
         validation = validate_calendar(calendar_data, task_list)
         calendar_path = Path(calendar_names[task_list.source_id])
         raw_tasks_path = Path("raw", "tasks", f"{stable_source_key(task_list.source_id)}.json")
+        raw_task_page_paths = tuple(
+            Path(
+                "raw",
+                "pages",
+                "tasks",
+                stable_source_key(task_list.source_id),
+                f"{page_number:04d}.json",
+            )
+            for page_number in range(1, len(source.raw_task_pages) + 1)
+        )
         counts = _feature_counts(source.raw_tasks)
         for key in aggregate:
             aggregate[key] += counts[key]
@@ -185,12 +228,17 @@ def plan_export(sources: Sequence[RawListExport], *, exported_at: datetime) -> E
                 PlannedFile(raw_tasks_path, _json_bytes(list(source.raw_tasks))),
             )
         )
+        planned_files.extend(
+            PlannedFile(path, _json_bytes(page))
+            for path, page in zip(raw_task_page_paths, source.raw_task_pages, strict=True)
+        )
         manifest_lists.append(
             {
                 "source_id": task_list.source_id,
                 "display_name": task_list.display_name,
                 "calendar_file": calendar_path.as_posix(),
                 "raw_tasks_file": raw_tasks_path.as_posix(),
+                "raw_task_page_files": [path.as_posix() for path in raw_task_page_paths],
                 "tasks": len(task_list.tasks),
                 **counts,
                 "validation": _validation_manifest(validation),
@@ -199,12 +247,20 @@ def plan_export(sources: Sequence[RawListExport], *, exported_at: datetime) -> E
 
     raw_lists_path = Path("raw", "lists.json")
     planned_files.append(
-        PlannedFile(raw_lists_path, _json_bytes([source.raw_list for source in sources]))
+        PlannedFile(raw_lists_path, _json_bytes([source.raw_list for source in source_items]))
+    )
+    raw_list_page_paths = tuple(
+        Path("raw", "pages", "lists", f"{page_number:04d}.json")
+        for page_number in range(1, len(export_data.raw_list_pages) + 1)
+    )
+    planned_files.extend(
+        PlannedFile(path, _json_bytes(page))
+        for path, page in zip(raw_list_page_paths, export_data.raw_list_pages, strict=True)
     )
 
     summary: dict[str, int | None] = {
-        "lists": len(sources),
-        "tasks": sum(len(source.raw_tasks) for source in sources),
+        "lists": len(source_items),
+        "tasks": sum(len(source.raw_tasks) for source in source_items),
         **aggregate,
         "checklist_items": None,
         "linked_resources": None,
@@ -220,6 +276,7 @@ def plan_export(sources: Sequence[RawListExport], *, exported_at: datetime) -> E
             "linked_resources": "not_collected",
             "attachment_metadata": "not_collected",
         },
+        "raw_list_page_files": [path.as_posix() for path in raw_list_page_paths],
         "lists": manifest_lists,
         "warnings": _warning_messages(aggregate),
         "errors": [],
@@ -258,7 +315,7 @@ def publish_export(plan: ExportPlan, destination: Path) -> None:
 
 def export_bundle(
     destination: Path,
-    sources: Sequence[RawListExport],
+    sources: ExportInput,
     *,
     dry_run: bool = False,
     clock: Clock = _utc_now,

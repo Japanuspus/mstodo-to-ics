@@ -9,6 +9,7 @@ description = "Export Microsoft To Do lists as RFC 5545 VTODO calendars"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "httpx>=0.28,<1",
     "icalendar>=6.1,<8",
     "tzdata>=2025.2",
 ]

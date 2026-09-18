@@ -4,15 +4,20 @@
 RFC 5545 calendars containing VTODO components. The eventual output is intended
 for manual import into Nextcloud Calendar and Tasks.
 
-The project currently supports offline export planning and transactional bundle
-publication. It can normalize decoded Graph JSON, produce one validated calendar
-per list, preserve raw list/task entities, and generate a migration manifest.
-Microsoft authentication and network access are not implemented yet.
+The project currently supports read-only Microsoft Graph retrieval behind an
+injected token provider, offline export planning, and transactional bundle
+publication. It can retrieve every list/task page, normalize decoded Graph JSON,
+produce one validated calendar per list, preserve raw entities and page envelopes,
+and generate a migration manifest. Microsoft device-code authentication is not
+implemented yet.
 
 ## Architecture
 
 ```text
 Microsoft Graph JSON
+        |
+        v
+validated read-only pagination
         |
         v
 normalized immutable domain values
