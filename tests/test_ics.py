@@ -44,10 +44,20 @@ def test_calendar_maps_status_priority_categories_and_unicode(normalized_list: T
     assert cast(int, active.decoded("PRIORITY")) == 1
     assert cast(list[str], active.decoded("CATEGORIES")) == ["Hjem", "Haster, snart"]
     assert str(completed["STATUS"]) == "COMPLETED"
-    assert cast(int, completed.decoded("PRIORITY")) == 5
+    assert cast(int, completed.decoded("PRIORITY")) == 0
     assert completed.get("COMPLETED") is not None
     assert "COMPLETED:20260916T184500Z" in serialize_calendar(normalized_list).decode("utf-8")
     assert str(completed["X-MSTODO-COMPLETED-TIMEZONE"]) == "Europe/Copenhagen"
+
+
+def test_low_importance_maps_to_low_priority(normalized_list: TodoList) -> None:
+    low = replace(normalized_list.tasks[0], importance="low")
+    task_list = replace(normalized_list, tasks=(low,))
+
+    calendar = Calendar.from_ical(serialize_calendar(task_list))
+    todo = cast(Any, calendar.walk("VTODO")[0])
+
+    assert cast(int, todo.decoded("PRIORITY")) == 9
 
 
 def test_uid_and_serialization_are_deterministic(normalized_list: TodoList) -> None:

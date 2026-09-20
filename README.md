@@ -104,6 +104,10 @@ requests but writes no snapshot. An export dry run is entirely offline and write
 
 ## Conversion behavior
 
+Microsoft Graph task `importance` is converted to iCalendar `PRIORITY`: `high` becomes `1`,
+`low` becomes `9`, and `normal` becomes `0` (no defined priority). Graph does not distinguish an
+explicit normal choice from a task without a chosen priority.
+
 Graph `dateTimeTimeZone` values retain their original local date-time string and timezone
 identifier rather than passing through the machine's local timezone.
 

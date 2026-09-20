@@ -19,7 +19,7 @@ _STATUS_MAP = {
     "waitingOnOthers": "NEEDS-ACTION",
     "deferred": "NEEDS-ACTION",
 }
-_PRIORITY_MAP = {"high": 1, "normal": 5, "low": 9}
+_PRIORITY_MAP = {"high": 1, "normal": 0, "low": 9}
 
 
 def _normalize_newlines(value: str) -> str:
